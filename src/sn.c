@@ -117,7 +117,7 @@ static int update_edge(n2n_sn_t * sss,
 	     macaddr_str(mac_buf, edgeMac),
 	     sock_to_cstr(sockbuf, sender_sock));
 
-  HASH_FIND_PEER(comm->edges, edgeMac, scan);
+  HASH_FIND_MAC(comm->edges, edgeMac, scan);
 
   if(NULL == scan) {
       /* Not known */
@@ -127,7 +127,7 @@ static int update_edge(n2n_sn_t * sss,
       memcpy(&(scan->mac_addr), edgeMac, sizeof(n2n_mac_t));
       memcpy(&(scan->sock), sender_sock, sizeof(n2n_sock_t));
 
-      HASH_ADD_PEER(comm->edges, scan);
+      HASH_ADD_MAC(comm->edges, scan);
 
       traceEvent(TRACE_INFO, "update_edge created   %s ==> %s",
 		 macaddr_str(mac_buf, edgeMac),
@@ -152,6 +152,24 @@ static int update_edge(n2n_sn_t * sss,
 
   scan->last_seen = now;
   return 0;
+}
+
+/* Find a known peer by a socket */
+static struct peer_info* find_peer_by_sock(struct sn_community *comm, const n2n_sock_t *sock) {
+  struct peer_info *scan, *tmp;
+
+  /* NOTE: linear search, could be optimized by using an additional hash table */
+  HASH_ITER(hh, comm->edges, scan, tmp) {
+    n2n_sock_t *s = &scan->sock;
+
+    if((s->port == sock->port) &&
+       (s->family == sock->family) &&
+       (!memcmp(&s->addr, &sock->addr, sizeof(sock->addr)))) {
+      return(scan);
+    }
+  }
+
+  return(NULL);
 }
 
 
@@ -196,11 +214,14 @@ static int try_forward(n2n_sn_t * sss,
 		       const uint8_t * pktbuf,
 		       size_t pktsize)
 {
-  struct peer_info *  scan;
+  struct peer_info   *scan;
+  struct mac_info    *m_info;
   macstr_t            mac_buf;
   n2n_sock_str_t      sockbuf;
 
-  HASH_FIND_PEER(comm->edges, dstMac, scan);
+  HASH_FIND_MAC(comm->macs, dstMac, m_info);
+
+  scan = m_info ? m_info->peer : NULL;
 
   if(NULL != scan)
     {
@@ -213,7 +234,7 @@ static int try_forward(n2n_sn_t * sss,
 	  traceEvent(TRACE_DEBUG, "unicast %lu to [%s] %s",
 		     pktsize,
 		     sock_to_cstr(sockbuf, &(scan->sock)),
-		     macaddr_str(mac_buf, scan->mac_addr));
+		     macaddr_str(mac_buf, dstMac));
         }
       else
         {
@@ -221,13 +242,14 @@ static int try_forward(n2n_sn_t * sss,
 	  traceEvent(TRACE_ERROR, "unicast %lu to [%s] %s FAILED (%d: %s)",
 		     pktsize,
 		     sock_to_cstr(sockbuf, &(scan->sock)),
-		     macaddr_str(mac_buf, scan->mac_addr),
+		     macaddr_str(mac_buf, dstMac),
 		     errno, strerror(errno));
         }
     }
   else
     {
-      traceEvent(TRACE_DEBUG, "try_forward unknown MAC");
+      traceEvent(TRACE_INFO, "try_forward unknown MAC: %s",
+	  macaddr_str(mac_buf, dstMac));
 
       /* Not a known MAC so drop. */
       return(-2);
@@ -551,10 +573,13 @@ static int process_udp(n2n_sn_t * sss,
      * different size due to addition of the socket.*/
     n2n_PACKET_t                    pkt;
     n2n_common_t                    cmn2;
+    mac_info_t                      *src_minfo;
     uint8_t                         encbuf[N2N_SN_PKTBUF_SIZE];
     size_t                          encx=0;
     int                             unicast; /* non-zero if unicast */
     uint8_t *                       rec_buf; /* either udp_buf or encbuf */
+    uint8_t *                       payload;
+    u_int16_t                       psize;
 
     if(!comm) {
       traceEvent(TRACE_DEBUG, "process_udp PACKET with unknown community %s", cmn.community);
@@ -563,6 +588,8 @@ static int process_udp(n2n_sn_t * sss,
 
     sss->stats.last_fwd=now;
     decode_PACKET(&pkt, &cmn, udp_buf, &rem, &idx);
+    payload = udp_buf + idx;
+    psize = udp_size - idx;
 
     unicast = (0 == is_multi_broadcast(pkt.dstMac));
 
@@ -589,7 +616,7 @@ static int process_udp(n2n_sn_t * sss,
       uint16_t oldEncx = encx;
 
       /* Copy the original payload unchanged */
-      encode_buf(encbuf, &encx, (udp_buf + idx), (udp_size - idx));
+      encode_buf(encbuf, &encx, payload, psize);
 
       if (comm->header_encryption == HEADER_ENCRYPTION_ENABLED)
         packet_header_encrypt (rec_buf, oldEncx, comm->header_encryption_ctx,
@@ -607,6 +634,33 @@ static int process_udp(n2n_sn_t * sss,
         packet_header_encrypt (rec_buf, idx, comm->header_encryption_ctx,
                                              comm->header_iv_ctx, pearson_hash_16 (rec_buf, udp_size));
     }
+
+    HASH_FIND_MAC(comm->macs, pkt.srcMac, src_minfo);
+
+    if(!src_minfo) {
+      /* New MAC detected, need to bind it to the sending peer */
+      struct peer_info *peer = find_peer_by_sock(comm, &pkt.sock);
+
+      if(peer) {
+        /* Learn new MAC */
+        src_minfo = (mac_info_t*) calloc(1, sizeof(mac_info_t));
+
+        memcpy(src_minfo->mac_addr, payload, sizeof(n2n_mac_t));
+        src_minfo->peer = peer;
+
+        HASH_ADD_MAC(comm->macs, src_minfo);
+
+        traceEvent(TRACE_DEBUG, "Learn new MAC: %s via %s",
+                  macaddr_str(mac_buf, src_minfo->mac_addr),
+                  sock_to_cstr(sockbuf, &pkt.sock));
+      } else {
+        traceEvent(TRACE_DEBUG, "Could not determine peer for %s",
+                  sock_to_cstr(sockbuf, &pkt.sock));
+      }
+    }
+
+    if(src_minfo)
+      src_minfo->last_seen = now;
 
     /* Common section to forward the final product. */
     if(unicast)
@@ -771,7 +825,7 @@ static int process_udp(n2n_sn_t * sss,
                 macaddr_str( mac_buf2, query.targetMac ) );
 
     struct peer_info *scan;
-    HASH_FIND_PEER(comm->edges, query.targetMac, scan);
+    HASH_FIND_MAC(comm->edges, query.targetMac, scan);
 
     if (scan) {
       cmn2.ttl = N2N_DEFAULT_TTL;
@@ -1126,6 +1180,7 @@ int main(int argc, char * const argv[]) {
 static int run_loop(n2n_sn_t * sss) {
   uint8_t pktbuf[N2N_SN_PKTBUF_SIZE];
   time_t last_purge_edges = 0;
+  time_t last_purge_macs = 0;
   struct sn_community *comm, *tmp;
 
   sss->start_time = time(NULL);
@@ -1202,6 +1257,7 @@ static int run_loop(n2n_sn_t * sss) {
     }
 
     HASH_ITER(hh, sss->communities, comm, tmp) {
+      purge_expired_macs(&comm->macs, &last_purge_macs);
       purge_expired_registrations( &comm->edges, &last_purge_edges );
 
       if((comm->edges == NULL) && (!sss->lock_communities)) {

@@ -206,6 +206,14 @@ struct peer_info {
   UT_hash_handle hh; /* makes this structure hashable */
 };
 
+typedef struct mac_info {
+  n2n_mac_t           mac_addr;
+  struct peer_info    *peer;
+  time_t              last_seen;
+
+  UT_hash_handle hh; /* makes this structure hashable */
+} mac_info_t;
+
 typedef struct speck_context_t he_context_t;
 typedef char n2n_sn_name_t[N2N_EDGE_SN_HOST_SIZE];
 
@@ -288,6 +296,7 @@ struct sn_community
   he_context_t        *header_encryption_ctx; /* Header encryption cipher context. */
   he_context_t        *header_iv_ctx;	      /* Header IV ecnryption cipher context, REMOVE as soon as seperte fileds for checksum and replay protection available */
   struct peer_info *edges; 		      /* Link list of registered edges. */
+  struct mac_info *macs;            /* Link list of known MAC addresses. */
 
   UT_hash_handle hh; /* makes this structure hashable */
 };
@@ -371,6 +380,7 @@ size_t purge_peer_list( struct peer_info ** peer_list,
                         time_t purge_before );
 size_t clear_peer_list( struct peer_info ** peer_list );
 size_t purge_expired_registrations( struct peer_info ** peer_list, time_t* p_last_purge );
+size_t purge_expired_macs(struct mac_info ** macs, time_t* p_last_purge);
 
 /* Edge conf */
 void edge_init_conf_defaults(n2n_edge_conf_t *conf);

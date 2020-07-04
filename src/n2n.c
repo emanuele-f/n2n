@@ -23,6 +23,7 @@
 #include <assert.h>
 
 #define PURGE_REGISTRATION_FREQUENCY   30
+#define PURGE_MACS_FREQUENCY           70
 #define REGISTRATION_TIMEOUT           60
 
 static const uint8_t broadcast_addr[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
@@ -267,6 +268,25 @@ void print_n2n_version() {
          "Built on %s\n"
 	 "Copyright 2007-2020 - ntop.org and contributors\n\n",
          GIT_RELEASE, PACKAGE_OSNAME, PACKAGE_BUILDDATE);
+}
+
+/* *********************************************** */
+
+size_t purge_expired_macs(struct mac_info ** macs, time_t* p_last_purge) {
+  time_t now = time(NULL);
+  size_t num_reg = 0;
+
+  if((now - (*p_last_purge)) < PURGE_MACS_FREQUENCY) return 0;
+
+  traceEvent(TRACE_DEBUG, "Purging old macs");
+
+  // TODO
+  //num_reg = purge_peer_list(peer_list, now-REGISTRATION_TIMEOUT);
+
+  (*p_last_purge) = now;
+  traceEvent(TRACE_DEBUG, "Remove %ld macs", num_reg);
+
+  return num_reg;
 }
 
 /* *********************************************** */ 
